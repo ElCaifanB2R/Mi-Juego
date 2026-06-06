@@ -2,6 +2,7 @@ const express = require('express');
 const http = require('http');
 const socketIo = require('socket.io');
 const cors = require('cors');
+const path = require('path');
 
 const app = express();
 const server = http.createServer(app);
@@ -9,9 +10,21 @@ const io = socketIo(server, {
   cors: { origin: "*" } 
 });
 
-// Servir archivos estáticos (la pantalla del juego)
+// ✅ IMPORTANTE: Servir archivos estáticos desde la carpeta "public"
 app.use(express.static('public'));
 app.use(cors());
+
+// ✅ NUEVO: Ruta para el controlador del celular con código de sala
+app.get('/control/:salaId', (req, res) => {
+  // Cuando alguien entra a /control/ABC123, le enviamos control.html
+  res.sendFile(path.join(__dirname, 'public', 'control.html'));
+});
+
+// ✅ NUEVO: Ruta para la pantalla del juego con código de sala
+app.get('/sala/:salaId', (req, res) => {
+  // Cuando alguien entra a /sala/ABC123, le enviamos index.html
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
 
 // ========== BASE DE DATOS SIMPLE DE PREGUNTAS ==========
 const preguntas = [
@@ -47,6 +60,28 @@ const preguntas = [
       { texto: "Emergencia familiar", puntos: 7, orden: 4 },
       { texto: "Se me olvidó", puntos: 3, orden: 5 }
     ]
+  },
+  {
+    id: "P004",
+    pregunta: "Menciona algo que guardas en el refrigerador",
+    respuestas: [
+      { texto: "Leche", puntos: 42, orden: 1 },
+      { texto: "Huevos", puntos: 28, orden: 2 },
+      { texto: "Verduras", puntos: 15, orden: 3 },
+      { texto: "Cerveza", puntos: 10, orden: 4 },
+      { texto: "Sofrito", puntos: 5, orden: 5 }
+    ]
+  },
+  {
+    id: "P005",
+    pregunta: "¿Qué hace tu mamá cuando te enoja?",
+    respuestas: [
+      { texto: "Te regaña", puntos: 48, orden: 1 },
+      { texto: "Te mira feo", puntos: 25, orden: 2 },
+      { texto: "Te ignora", puntos: 15, orden: 3 },
+      { texto: "Llama a tu papá", puntos: 8, orden: 4 },
+      { texto: "Te quita el celular", puntos: 4, orden: 5 }
+    ]
   }
 ];
 
@@ -64,7 +99,8 @@ class SalaJuego {
     this.strikes = 0;
     this.equipoJugando = null;
     this.respuestasReveladas = [];
-    this.estado = 'esperando'; // esperando, preguntando, revelando, terminado
+    this.estado = 'esperando';
+    this.presentador = null;
   }
 
   obtenerPreguntaAleatoria() {
@@ -112,11 +148,13 @@ class SalaJuego {
     const normalizada = this.normalizarTexto(textoRespuesta);
     
     for (let respuesta of pregunta.respuestas) {
-      if (this.calcularSimilitud(normalizada, this.normalizarTexto(respuesta.texto)) > 0.75) {
+      const similitud = this.calcularSimilitud(normalizada, this.normalizarTexto(respuesta.texto));
+      if (similitud > 0.75) {
         return {
           correcta: true,
           respuesta: respuesta,
-          esTop: respuesta.orden === 1
+          esTop: respuesta.orden === 1,
+          similitud: similitud
         };
       }
     }
@@ -134,13 +172,14 @@ class SalaJuego {
   calcularSimilitud(str1, str2) {
     if (str1 === str2) return 1;
     if (str1.includes(str2) || str2.includes(str1)) return 0.9;
-    // Distancia simple de Levenshtein (versión básica)
-    const len = Math.max(str1.length, str2.length);
-    let coincidencias = 0;
-    for (let i = 0; i < Math.min(str1.length, str2.length); i++) {
-      if (str1[i] === str2[i]) coincidencias++;
-    }
-    return coincidencias / len;
+    
+    // Palabras clave
+    const palabras1 = str1.split(' ');
+    const palabras2 = str2.split(' ');
+    const comunes = palabras1.filter(p => palabras2.includes(p));
+    if (comunes.length > 0) return 0.85;
+    
+    return 0;
   }
 
   agregarStrike() {
@@ -196,7 +235,7 @@ function generarCodigo() {
 io.on('connection', (socket) => {
   console.log('Nuevo jugador conectado:', socket.id);
 
-  // Crear sala
+  // Crear sala (solo presentador)
   socket.on('CREAR_SALA', () => {
     const salaId = generarCodigo();
     salas[salaId] = new SalaJuego(salaId);
@@ -204,23 +243,44 @@ io.on('connection', (socket) => {
     socket.salaId = salaId;
     socket.esPresentador = true;
     
+    salas[salaId].presentador = socket.id;
+    
     socket.emit('SALA_CREADA', { 
       salaId,
-      urlJuego: `https://tu-juego.com/sala/${salaId}`,
-      urlControl: `https://tu-juego.com/control/${salaId}`
+      urlJuego: `${socket.handshake.headers.origin || 'https://tu-app.onrender.com'}/sala/${salaId}`,
+      urlControl: `${socket.handshake.headers.origin || 'https://tu-app.onrender.com'}/control/${salaId}`
     });
     
-    console.log(`Sala creada: ${salaId}`);
+    console.log(`✅ Sala creada: ${salaId}`);
   });
 
-  // Unirse a sala
+  // Unirse a sala (jugadores o presentador)
   socket.on('UNIRSE_SALA', ({ salaId, equipo, nombre }) => {
     const sala = salas[salaId];
     if (!sala) {
-      socket.emit('ERROR', 'Sala no existe');
+      socket.emit('ERROR', 'Sala no existe. Verifica el código.');
       return;
     }
     
+    if (!nombre || nombre.trim().length < 2) {
+      socket.emit('ERROR', 'Por favor ingresa un nombre válido');
+      return;
+    }
+
+    // Si es presentador reuniéndose
+    if (socket.esPresentador) {
+      socket.join(salaId);
+      socket.salaId = salaId;
+      socket.emit('UNIDO_EXITOSO', { 
+        salaId, 
+        equipo: 'PRESENTADOR', 
+        nombre: 'Presentador',
+        esPresentador: true 
+      });
+      return;
+    }
+
+    // Validar equipo
     if (!['A', 'B'].includes(equipo)) {
       socket.emit('ERROR', 'Equipo debe ser A o B');
       return;
@@ -229,33 +289,33 @@ io.on('connection', (socket) => {
     socket.join(salaId);
     socket.salaId = salaId;
     socket.jugadorId = socket.id;
-    socket.nombre = nombre;
+    socket.nombre = nombre.trim();
     socket.equipo = equipo;
     
     sala.equipos[equipo].push({
       id: socket.id,
-      nombre,
+      nombre: nombre.trim(),
       conectado: true
     });
     
     socket.emit('UNIDO_EXITOSO', { 
       salaId, 
       equipo, 
-      nombre,
+      nombre: nombre.trim(),
       jugadoresEnEquipo: sala.equipos[equipo].length 
     });
     
     io.to(salaId).emit('JUGADOR_UNIDO', { 
-      nombre, 
+      nombre: nombre.trim(), 
       equipo, 
       totalA: sala.equipos.A.length,
       totalB: sala.equipos.B.length
     });
     
-    console.log(`${nombre} se unió al equipo ${equipo} en sala ${salaId}`);
+    console.log(`👤 ${nombre.trim()} se unió al equipo ${equipo} en sala ${salaId}`);
   });
 
-  // Iniciar juego (solo presentador)
+  // Iniciar juego
   socket.on('INICIAR_JUEGO', () => {
     const sala = salas[socket.salaId];
     if (!sala || !socket.esPresentador) return;
@@ -272,12 +332,13 @@ io.on('connection', (socket) => {
     
     const pregunta = sala.obtenerPreguntaAleatoria();
     if (!pregunta) {
-      socket.emit('ERROR', 'No hay más preguntas');
+      socket.emit('ERROR', 'No hay más preguntas disponibles');
       return;
     }
     
     sala.preguntaActual = pregunta;
     sala.strikes = 0;
+    sala.equipoJugando = null;
     sala.respuestasReveladas = [];
     sala.estado = 'preguntando';
     
@@ -300,35 +361,48 @@ io.on('connection', (socket) => {
     const sala = salas[socket.salaId];
     if (!sala) return;
     
-    const resultado = sala.procesarBuzz(socket.jugadorId, Date.now());
+    const resultado = sala.procesarBuzz(socket.jugadorId || socket.id, Date.now());
     if (resultado) {
-      console.log(`Buzzer ganado por ${socket.nombre}`);
+      console.log(`🔔 Buzzer ganado por ${socket.nombre || socket.id}`);
     }
   });
 
   // Enviar respuesta
   socket.on('RESPUESTA_JUGADOR', ({ respuesta }) => {
     const sala = salas[socket.salaId];
-    if (!sala) return;
+    if (!sala || !respuesta) return;
     
     const resultado = sala.validarRespuesta(respuesta);
+    const jugador = sala.encontrarJugador(socket.jugadorId || socket.id);
+    const equipo = jugador ? jugador.equipo : null;
     
     if (resultado.correcta) {
-      const jugador = sala.encontrarJugador(socket.jugadorId);
-      const equipo = jugador ? jugador.equipo : null;
-      
       // Si es la primera respuesta correcta y es top, elige jugar o pasar
       if (resultado.esTop && !sala.equipoJugando) {
         sala.equipoJugando = equipo;
         io.to(sala.id).emit('RESPUESTA_TOP', {
           respuesta: resultado.respuesta,
-          jugador: socket.nombre,
+          jugador: socket.nombre || 'Jugador',
           equipo,
-          mensaje: `${socket.nombre} acertó la respuesta #1`
+          mensaje: `${socket.nombre || 'Jugador'} acertó la respuesta #1: "${resultado.respuesta.texto}"`
         });
       } else if (sala.equipoJugando === equipo) {
         // Respuesta correcta del equipo que juega
         sala.revelarRespuesta(resultado.respuesta);
+        // Verificar si ya se revelaron todas
+        const todasReveladas = sala.preguntaActual.respuestas.every(r => 
+          sala.respuestasReveladas.includes(r.texto)
+        );
+        if (todasReveladas) {
+          const puntos = sala.calcularPuntosEnJuego();
+          sala.sumarPuntos(equipo, puntos);
+          sala.estado = 'esperando';
+          io.to(sala.id).emit('RONDA_TERMINADA', { 
+            equipo, 
+            puntos,
+            mensaje: `¡Equipo ${equipo} se lleva ${puntos} puntos!`
+          });
+        }
       } else {
         // El otro equipo intenta robar
         sala.revelarRespuesta(resultado.respuesta);
@@ -339,16 +413,18 @@ io.on('connection', (socket) => {
       }
     } else {
       // Respuesta incorrecta
-      const jugador = sala.encontrarJugador(socket.jugadorId);
-      const equipo = jugador ? jugador.equipo : null;
-      
       if (sala.equipoJugando === equipo) {
         sala.agregarStrike();
+        // Si ya hay 3 strikes, la otra equipo puede robar
+        if (sala.strikes >= 3) {
+          const otroEquipo = equipo === 'A' ? 'B' : 'A';
+          io.to(sala.id).emit('ROBO_DISPONIBLE', { equipo: otroEquipo });
+        }
       }
     }
   });
 
-  // Pasar turno (cuando aciertan la #1)
+  // Elegir jugar o pasar (después de acertar la #1)
   socket.on('ELEGIR_JUGAR', ({ jugar }) => {
     const sala = salas[socket.salaId];
     if (!sala) return;
@@ -368,6 +444,38 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Intentar robo
+  socket.on('INTENTAR_ROBO', ({ respuesta }) => {
+    const sala = salas[socket.salaId];
+    if (!sala || sala.estado !== 'robo') return;
+    
+    const jugador = sala.encontrarJugador(socket.jugadorId || socket.id);
+    const equipo = jugador ? jugador.equipo : null;
+    const equipoOpuesto = sala.equipoJugando === 'A' ? 'B' : 'A';
+    
+    if (equipo !== equipoOpuesto) {
+      socket.emit('ERROR', 'No es tu turno para robar');
+      return;
+    }
+    
+    const resultado = sala.validarRespuesta(respuesta);
+    if (resultado.correcta && !sala.respuestasReveladas.includes(resultado.respuesta.texto)) {
+      const puntos = sala.calcularPuntosEnJuego();
+      sala.sumarPuntos(equipo, puntos);
+      sala.estado = 'esperando';
+      io.to(sala.id).emit('ROBO_EXITOSO', { equipo, puntos });
+    } else {
+      // Falló el robo, el equipo original se lleva los puntos
+      const puntos = sala.calcularPuntosEnJuego();
+      sala.sumarPuntos(sala.equipoJugando, puntos);
+      sala.estado = 'esperando';
+      io.to(sala.id).emit('ROBO_FALLIDO', { 
+        equipo: sala.equipoJugando, 
+        puntos 
+      });
+    }
+  });
+
   // Pasar a siguiente ronda
   socket.on('SIGUIENTE_RONDA', () => {
     const sala = salas[socket.salaId];
@@ -375,7 +483,13 @@ io.on('connection', (socket) => {
     
     sala.ronda++;
     if (sala.ronda > 5) {
-      io.to(sala.id).emit('JUEGO_TERMINADO', sala.puntos);
+      // Juego terminado
+      const ganador = sala.puntos.A > sala.puntos.B ? 'A' : (sala.puntos.B > sala.puntos.A ? 'B' : 'EMPATE');
+      io.to(sala.id).emit('JUEGO_TERMINADO', { 
+        puntos: sala.puntos,
+        ganador,
+        mensaje: ganador === 'EMPATE' ? '¡EMPATE!' : `¡Equipo ${ganador} GANA!`
+      });
       return;
     }
     
@@ -392,16 +506,19 @@ io.on('connection', (socket) => {
     const sala = salas[socket.salaId];
     if (!sala || !socket.esPresentador) return;
     
-    // Seleccionar jugador con más puntos o aleatorio
     const jugadores = [...sala.equipos.A, ...sala.equipos.B];
-    const jugador = jugadores[Math.floor(Math.random() * jugadores.length)];
+    if (jugadores.length === 0) {
+      socket.emit('ERROR', 'No hay jugadores para Dinero Rápido');
+      return;
+    }
     
+    const jugador = jugadores[Math.floor(Math.random() * jugadores.length)];
     sala.estado = 'dinero_rapido';
     
     io.to(sala.id).emit('INICIO_DINERO_RAPIDO', {
       jugador: jugador.nombre,
       tiempoPorPregunta: 20,
-      preguntas: preguntas.slice(0, 5).map(p => p.pregunta)
+      preguntas: preguntas.slice(0, 5).map(p => ({ pregunta: p.pregunta, id: p.id }))
     });
   });
 
@@ -413,6 +530,7 @@ io.on('connection', (socket) => {
       for (let eq of ['A', 'B']) {
         sala.equipos[eq] = sala.equipos[eq].filter(j => j.id !== socket.id);
       }
+      io.to(sala.id).emit('JUGADOR_DESCONECTADO', { id: socket.id });
     }
   });
 });
@@ -420,5 +538,7 @@ io.on('connection', (socket) => {
 // ========== INICIAR SERVIDOR ==========
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-  console.log(`🎮 Servidor de 100 Latinos Dijeron corriendo en puerto ${PORT}`);
+  console.log(`🎮 100 LATINOS DIJERON corriendo en puerto ${PORT}`);
+  console.log(`📺 Pantalla del juego: http://localhost:${PORT}/sala/TUCODIGO`);
+  console.log(`📱 Control celular: http://localhost:${PORT}/control/TUCODIGO`);
 });
