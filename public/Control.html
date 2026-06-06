@@ -92,8 +92,6 @@
       background: #00ff88;
       color: #1a1a2e;
     }
-    .equipo-a { border: 3px solid #ff6b6b; }
-    .equipo-b { border: 3px solid #4ecdc4; }
     .hidden { display: none !important; }
   </style>
 </head>
@@ -114,7 +112,7 @@
   <div class="estado hidden" id="estado">Conectando...</div>
   
   <button class="buzzer-btn" id="buzzer" onclick="presionarBuzzer()">
-    🔴<br>TOCA<br>RÁPIDO
+    🔴<<br>TOCA<br>RÁPIDO
   </button>
 
   <div class="respuesta-input" id="respuesta-box">
@@ -178,14 +176,12 @@
     function enviarRespuesta() {
       const respuesta = document.getElementById('respuesta-texto').value.trim();
       if (!respuesta) return;
-      
       socket.emit('RESPUESTA_JUGADOR', { respuesta });
       document.getElementById('respuesta-texto').value = '';
       document.getElementById('respuesta-box').style.display = 'none';
       mostrarEstado('Respuesta enviada...');
     }
 
-    // También enviar con Enter
     document.getElementById('respuesta-texto').addEventListener('keypress', (e) => {
       if (e.key === 'Enter') enviarRespuesta();
     });
